@@ -1,0 +1,197 @@
+version: "3.8"
+
+services:
+  # Cloudflared
+  #------------
+  cloudflared:
+    image: visibilityspots/cloudflared:latest
+    container_name: cloudflared
+    environment:
+      TZ: '${TIMEZONE}'
+    restart: unless-stopped
+    networks:
+      pihole_net:
+        ipv4_address: 10.0.0.2
+
+
+  # pihole
+  #-------
+  pi-hole:
+    image: pihole/pihole:v5.8
+    container_name: pihole
+    hostname: pihole
+    restart: unless-stopped
+    ports:
+        - "53:53/tcp"
+        - "53:53/udp"
+        - "67:67/udp"
+        - "80:80/tcp"
+        - "443:443/tcp"
+    environment:
+      ServerIP: 10.0.0.3
+      DNS1: '10.0.0.2#5054'
+      DNS2: ''
+      TZ: '${TIMEZONE}'
+      DNSMASQ_LISTENING: all
+      WEBPASSWORD: admin
+    volumes:
+      - './pihole/etc-pihole/:/etc/pihole/'
+      - './pihole/etc-dnsmasq.d/:/etc/dnsmasq.d/'
+    networks:
+      pihole_net:
+        ipv4_address: 10.0.0.3
+    dns:
+      - 127.0.0.1
+      - 1.1.1.1
+    cap_add:
+      - NET_ADMIN
+
+
+  # Portainer
+  #----------
+  portainer:
+    container_name: portainer
+    image: portainer/portainer-ce:2.1.1
+    restart: unless-stopped
+    command: -H unix:///var/run/docker.sock
+    ports:
+      - 9000:9000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./portainer/data/:/data
+
+
+  # UniFi Controller
+  #-----------------
+  unifi-controller:
+    image: "jacobalberty/unifi:v6.4.54"
+    container_name: unifi-controller
+    init: true
+    networks:
+      - unifi
+    restart: always
+    volumes:
+      - ./unifi/dir:/unifi
+      - ./unifi/data:/unifi/data
+      - ./unifi/log:/unifi/log
+      - ./unifi/cert:/unifi/cert
+      - ./unifi/init:/unifi/init.d
+      - ./unifi/run:/var/run/unifi
+    environment:
+      RUNAS_UID0: 'false'
+    ports:
+      - "3478:3478/udp" # STUN
+      - "6789:6789/tcp" # Speed test
+      - "8080:8080/tcp" # Device/ controller comm.
+      - "8443:8443/tcp" # Controller GUI/API as seen in a web browser
+      - "8880:8880/tcp" # HTTP portal redirection
+      - "8843:8843/tcp" # HTTPS portal redirection
+      - "10001:10001/udp" # AP discovery
+
+
+  # UniFi Logs
+  #-----------
+  unifi-logs:
+    image: bash
+    container_name: unifi-logs
+    depends_on:
+      - unifi-controller
+    command: bash -c 'tail -F ./unifi/log/*.log'
+    restart: always
+    volumes:
+      - ./unifi/log:/unifi/log
+
+
+  # Grafana
+  #--------
+  grafana:
+    image: grafana/grafana:7.5.2
+    container_name: grafana
+    depends_on:
+      - influxdb
+      - telegraf
+    restart: always
+    user: "1000"
+    ports: 
+      - "3000:3000"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+      - ./grafana/data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+      - ./grafana/dashboard_exports:/var/lib/grafana/dashboards
+    environment:
+      - "GF_SECURITY_ADMIN_USER=grafana"
+      - "GF_SECURITY_ADMIN_PASSWORD=grafana"
+
+
+  # InfluxDB
+  #---------
+  influxdb:
+    image: influxdb:1.8.4
+    container_name: influxdb
+    ports:
+      - '8086:8086'
+    volumes:
+      - ./influxdb:/var/lib/influxdb
+      - ./influxdb/init/init.iql:/docker-entrypoint-initdb.d/
+    environment:
+      - INFLUXDB_DB=rpi_monitoring2
+      - INFLUXDB_ADMIN_USER=influxdb
+      - INFLUXDB_ADMIN_PASSWORD=influxdb  
+
+
+  # Telegraf
+  #--------   
+  telegraf:
+    image: telegraf:1.18
+    container_name: telegraf
+    depends_on: 
+      - influxdb
+    restart: always
+    environment:
+      HOST_PROC: /rootfs/proc
+      HOST_SYS: /rootfs/sys
+      HOST_ETC: /rootfs/etc
+    hostname: localhost
+    volumes:
+    - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - /sys:/rootfs/sys:ro
+    - /proc:/rootfs/proc:ro
+    - /etc:/rootfs/etc:ro
+
+  # Rclone
+  #--------
+  rclone:
+    image: rclone/rclone
+    container_name: rclone
+    restart: always
+    command: rcd --rc-web-gui-no-open-browser --rc-addr :5572 --rc-user admin --rc-pass admin
+    ports:
+      - 5572:5572
+    volumes:
+      - /home/pi/docker/rclone:/config/rclone
+      - /home/pi/docker/rclone:/logs
+      - /home/pi/docker/rclone/data:/data:shared
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
+    cap_add:
+      - SYS_ADMIN
+      - SETPCAP
+      - MKNOD
+    environment:
+      - PHP_TZ=Europe/Brussels
+      - PUID=1001
+      - PGID=1001
+
+networks:
+  unifi:
+  pihole_net:
+    driver: bridge
+    ipam:
+     config:
+       - subnet: 10.0.0.0/29
